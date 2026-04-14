@@ -9,8 +9,8 @@ static const char *TAG = "PowerMeter";
 
 constexpr gpio_num_t kVoltagePin  = GPIO_NUM_15;
 constexpr gpio_num_t kCurrentPin  = GPIO_NUM_16;
-constexpr gpio_num_t kVoltage2Pin = GPIO_NUM_3;
-constexpr gpio_num_t kCurrent2Pin = GPIO_NUM_6;
+constexpr gpio_num_t kVoltage2Pin = GPIO_NUM_13;
+constexpr gpio_num_t kCurrent2Pin = GPIO_NUM_12;
 constexpr gpio_num_t kRelayPin    = GPIO_NUM_14;
 
 extern "C" void app_main() {
