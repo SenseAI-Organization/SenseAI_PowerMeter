@@ -25,8 +25,10 @@ extern "C" void app_main() {
     // Configure ADC width and attenuation for current (GPIO16 → ADC2_CH5)
     adc2_config_channel_atten(ADC2_CHANNEL_5, ADC_ATTEN_DB_12);
 
-    // Set relay state: GPIO_HIGH to activate, GPIO_LOW to deactivate
-    gpio_set_level(kRelayPin, 1);  // 1 = HIGH (relay ON), 0 = LOW (relay OFF)
+    gpio_set_level(kRelayPin, 0);  // Start with relay OFF
+
+    uint32_t relay_state = 0;
+    TickType_t last_toggle = xTaskGetTickCount();
 
     while (true) {
         int voltage = 0;
@@ -36,6 +38,13 @@ extern "C" void app_main() {
         adc2_get_raw(ADC2_CHANNEL_5, ADC_WIDTH_BIT_12, &current);
 
         ESP_LOGI(TAG, "Voltage raw: %d | Current raw: %d", voltage, current);
+
+        if ((xTaskGetTickCount() - last_toggle) >= pdMS_TO_TICKS(30000)) {
+            relay_state ^= 1;
+            gpio_set_level(kRelayPin, relay_state);
+            ESP_LOGI(TAG, "Relay: %s", relay_state ? "ON" : "OFF");
+            last_toggle = xTaskGetTickCount();
+        }
 
         vTaskDelay(pdMS_TO_TICKS(500));
     }
