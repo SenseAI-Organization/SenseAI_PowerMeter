@@ -13,6 +13,8 @@ constexpr gpio_num_t kVoltage2Pin = GPIO_NUM_13;
 constexpr gpio_num_t kCurrent2Pin = GPIO_NUM_12;
 constexpr gpio_num_t kRelayPin    = GPIO_NUM_14;
 
+bool isRelayOn = false;
+
 extern "C" void app_main() {
 
     // Configure relay pin as output (no output class in sensors library)
@@ -57,9 +59,8 @@ extern "C" void app_main() {
         loop_count++;
         if (loop_count % kLoopsPerMin == 0) {
             ESP_LOGI(TAG, "Activating relay");
-            gpio_set_level(kRelayPin, 1);
-            vTaskDelay(pdMS_TO_TICKS(kRelayPulseMs));
-            gpio_set_level(kRelayPin, 0);
+            gpio_set_level(kRelayPin, isRelayOn ? 0 : 1);
+            isRelayOn = !isRelayOn;
         } else {
             vTaskDelay(pdMS_TO_TICKS(kLoopMs));
         }
