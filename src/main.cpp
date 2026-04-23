@@ -1,3 +1,5 @@
+#include <cmath>
+
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -14,6 +16,45 @@ constexpr gpio_num_t kCurrent2Pin = GPIO_NUM_12;
 constexpr gpio_num_t kRelayPin    = GPIO_NUM_14;
 
 bool isRelayOn = false;
+
+/**
+ * @brief Measures AC RMS for a sensor by taking N samples, removing the DC
+ *        offset (midpoint bias), and computing sqrt(mean(x^2)).
+ *
+ * @param sensor     VoltageDivider sensor, already init()'d.
+ * @param samples    Number of ADC samples (500 covers 5 full 50 Hz cycles at 2 ms/sample).
+ * @param delay_ms   Delay between samples in ms (2 ms → ~500 Hz sample rate).
+ * @return           RMS value in mV (calibrated), or raw-scaled mV if calibration unavailable.
+ */
+static float measureRms(VoltageDivider &sensor, int samples = 500, int delay_ms = 2) {
+    // Pass 1: compute DC offset (mean)
+    double sum = 0.0;
+    for (int i = 0; i < samples; i++) {
+        sensor.measure();
+        int mv = sensor.getCalibratedMv();
+        // Fall back to raw-scaled value if calibration is not available
+        if (mv == kAdcValueError) {
+            mv = (sensor.getValue() * 3300) / 4095;
+        }
+        sum += mv;
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+    }
+    const float offset = static_cast<float>(sum / samples);
+
+    // Pass 2: compute RMS around the offset
+    double sumSq = 0.0;
+    for (int i = 0; i < samples; i++) {
+        sensor.measure();
+        int mv = sensor.getCalibratedMv();
+        if (mv == kAdcValueError) {
+            mv = (sensor.getValue() * 3300) / 4095;
+        }
+        const float centered = mv - offset;
+        sumSq += centered * centered;
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+    }
+    return std::sqrt(static_cast<float>(sumSq / samples));
+}
 
 extern "C" void app_main() {
 
@@ -38,31 +79,23 @@ extern "C" void app_main() {
     ESP_ERROR_CHECK(voltage2.init());
     ESP_ERROR_CHECK(current2.init());
 
-    constexpr uint32_t kLoopMs        = 500;
-    constexpr uint32_t kRelayPulseMs  = 500;
-    constexpr uint32_t kLoopsPerMin   = 60000 / kLoopMs;  // 120 iterations = 1 minute
+    constexpr uint32_t kLoopsPerMin = 2;  // each loop is ~2 s (2×500 samples×2 ms per sensor pair)
     uint32_t loop_count = 0;
 
     while (true) {
-        voltage1.measure();
-        current1.measure();
-        voltage2.measure();
-        current2.measure();
+        const float v1Rms = measureRms(voltage1);
+        const float i1Rms = measureRms(current1);
+        const float v2Rms = measureRms(voltage2);
+        const float i2Rms = measureRms(current2);
 
-        printf("V1 raw: %d (%d mV), I1 raw: %d (%d mV) | "
-                 "V2 raw: %d (%d mV), I2 raw: %d (%d mV)\n",
-                 voltage1.getValue(), voltage1.getCalibratedMv(),
-                 current1.getValue(), current1.getCalibratedMv(),
-                 voltage2.getValue(), voltage2.getCalibratedMv(),
-                 current2.getValue(), current2.getCalibratedMv());
+        printf("V1 RMS: %.2f mV, I1 RMS: %.2f mV | V2 RMS: %.2f mV, I2 RMS: %.2f mV\n",
+               v1Rms, i1Rms, v2Rms, i2Rms);
 
         loop_count++;
         if (loop_count % kLoopsPerMin == 0) {
-            ESP_LOGI(TAG, "Activating relay");
+            ESP_LOGI(TAG, "Toggling relay");
             gpio_set_level(kRelayPin, isRelayOn ? 0 : 1);
             isRelayOn = !isRelayOn;
-        } else {
-            vTaskDelay(pdMS_TO_TICKS(kLoopMs));
         }
     }
 }
