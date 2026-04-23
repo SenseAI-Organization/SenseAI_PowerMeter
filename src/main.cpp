@@ -26,18 +26,22 @@ bool isRelayOn = false;
  * @param delay_ms   Delay between samples in ms (2 ms → ~500 Hz sample rate).
  * @return           RMS value in mV (calibrated), or raw-scaled mV if calibration unavailable.
  */
-static float measureRms(VoltageDivider &sensor, int samples = 500, int delay_ms = 2) {
+// Sample in bursts: every kYieldEvery samples yield for 1 tick (10 ms at 100 Hz),
+// letting the IDLE task reset the watchdog. 200 samples × ~10 bursts × 10 ms ≈ 110 ms
+// per pass → covers ~5.5 full 50 Hz cycles, which is sufficient for stable RMS.
+static float measureRms(VoltageDivider &sensor, int samples = 200, int yield_every = 20) {
     // Pass 1: compute DC offset (mean)
     double sum = 0.0;
     for (int i = 0; i < samples; i++) {
         sensor.measure();
         int mv = sensor.getCalibratedMv();
-        // Fall back to raw-scaled value if calibration is not available
         if (mv == kAdcValueError) {
             mv = (sensor.getValue() * 3300) / 4095;
         }
         sum += mv;
-        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        if ((i + 1) % yield_every == 0) {
+            vTaskDelay(1);  // 1 tick = 10 ms; lets IDLE run and resets WDT
+        }
     }
     const float offset = static_cast<float>(sum / samples);
 
@@ -51,7 +55,9 @@ static float measureRms(VoltageDivider &sensor, int samples = 500, int delay_ms 
         }
         const float centered = mv - offset;
         sumSq += centered * centered;
-        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        if ((i + 1) % yield_every == 0) {
+            vTaskDelay(1);
+        }
     }
     return std::sqrt(static_cast<float>(sumSq / samples));
 }
