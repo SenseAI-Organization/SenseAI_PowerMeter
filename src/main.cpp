@@ -79,8 +79,8 @@ extern "C" void app_main() {
     ESP_ERROR_CHECK(voltage2.init());
     ESP_ERROR_CHECK(current2.init());
 
-    constexpr uint32_t kLoopsPerMin = 2;  // each loop is ~2 s (2×500 samples×2 ms per sensor pair)
-    uint32_t loop_count = 0;
+    constexpr int64_t kRelayIntervalUs = 20LL * 1000000LL;  // 20 seconds
+    int64_t lastRelayToggle = esp_timer_get_time();
 
     while (true) {
         const float v1Rms = measureRms(voltage1);
@@ -88,14 +88,14 @@ extern "C" void app_main() {
         const float v2Rms = measureRms(voltage2);
         const float i2Rms = measureRms(current2);
 
-        printf("V1 RMS: %.2f mV, I1 RMS: %.2f mV | V2 RMS: %.2f mV, I2 RMS: %.2f mV\n",
-               v1Rms, i1Rms, v2Rms, i2Rms);
+        printf("V1 RMS: %.2f mV, I1 RMS: %.2f mV \n",
+               v1Rms, i1Rms);
 
-        loop_count++;
-        if (loop_count % kLoopsPerMin == 0) {
+        if (esp_timer_get_time() - lastRelayToggle >= kRelayIntervalUs) {
             ESP_LOGI(TAG, "Toggling relay");
             gpio_set_level(kRelayPin, isRelayOn ? 0 : 1);
             isRelayOn = !isRelayOn;
+            lastRelayToggle = esp_timer_get_time();
         }
     }
 }
