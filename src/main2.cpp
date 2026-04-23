@@ -28,7 +28,7 @@ extern "C" void app_main() {
     relay_cfg.pull_down_en  = GPIO_PULLDOWN_DISABLE;
     relay_cfg.intr_type     = GPIO_INTR_DISABLE;
     gpio_config(&relay_cfg);
-    gpio_set_level(kRelayPin, 1);  // HIGH → relay ON
+    gpio_set_level(kRelayPin, 0);  // LOW → relay OFF
 
     static constexpr int64_t kRelayIntervalUs = 20LL * 1000000LL;  // 20 seconds
     bool     isRelayOn      = true;
