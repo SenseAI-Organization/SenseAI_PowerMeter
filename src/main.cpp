@@ -1,52 +1,27 @@
-#include "ble_sense.hpp"
-#include "driver/gpio.h"
-#include "DYP_A22YYMW.hpp"
+#include "esp_mac.h"
+#include "esp_timer.h"
 #include "esp_log.h"
+#include "espnow_sense.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "nvs_flash.h"
-#include "voltage_divider_sense.hpp"
+#include "driver/gpio.h"
 #include "actuators_sense.hpp"
 
-static const char *TAG = "PowerMeter";
-static BLEServer   *g_server          = nullptr;
-static RGB         *g_led             = nullptr;
-static DYP_A22YYMW *g_distance        = nullptr;
-static bool         g_relay_forced    = false;  // true = relay locked ON by BLE command
-static volatile bool g_proximity_active = false;  // updated every loop iteration
+#define TAG "ESP_NOW_SERVER_TEST"
 
-constexpr gpio_num_t kVoltagePin  = GPIO_NUM_15;
-constexpr gpio_num_t kCurrentPin  = GPIO_NUM_16;
-constexpr gpio_num_t kVoltage2Pin = GPIO_NUM_3;
-constexpr gpio_num_t kCurrent2Pin = GPIO_NUM_6;
-constexpr gpio_num_t kRelayPin    = GPIO_NUM_14;
-constexpr gpio_num_t kTrigPin     = GPIO_NUM_4;
-constexpr gpio_num_t kEchoPin     = GPIO_NUM_5;
-constexpr float      kProximityMm = 500.0f;  // 50 cm in mm
+// 48:ca:43:15:ff:2c
+// uint8_t serverMac[6] = {0x48, 0xCA, 0x43, 0x15, 0xFF, 0x4C};
+uint8_t broadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
-constexpr gpio_num_t kRGBPin = GPIO_NUM_2; 
+constexpr gpio_num_t kRelayPin = GPIO_NUM_14;
+
+constexpr gpio_num_t kRGBPin = GPIO_NUM_2;
+
+static bool kRelayForced = false;  // true = relay locked ON by ESP-NOW command
 
 extern "C" void app_main() {
-    // NVS init (required by BLE)
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
 
-    RGB brainLED(kRGBPin, 255, 255, 255);
-    g_led = &brainLED;
-
-    // Initialize the RGB LED interface (RMT configuration)
-    esp_err_t err = brainLED.init();
-    if (err) {
-        printf("LED couldn't be initialized.\n");
-        printf("%s\n", esp_err_to_name(err));
-        return;
-    }
-
-    // Configure relay pin as output (no output class in sensors library)
+    // Configure relay pin as output
     gpio_config_t relay_cfg = {};
     relay_cfg.pin_bit_mask = (1ULL << kRelayPin);
     relay_cfg.mode         = GPIO_MODE_OUTPUT;
@@ -55,114 +30,58 @@ extern "C" void app_main() {
     relay_cfg.intr_type    = GPIO_INTR_DISABLE;
     gpio_config(&relay_cfg);
     gpio_set_level(kRelayPin, 0);  // Start with relay OFF
+    
+    // Create ESP-NOW object as server, using channel 1
+    EspNow espServer(6, 1, true);
 
-    // Analog sensors using VoltageDivider (concrete subclass of AnalogSensor)
-    // R1=0, R2=1 → pass-through; use getValue() for raw ADC, getCalibratedMv() for mV
-    VoltageDivider voltage1(kVoltagePin,  ADC_ATTEN_DB_12, ADC_BITWIDTH_12, 0, 1);
-    VoltageDivider current1(kCurrentPin,  ADC_ATTEN_DB_12, ADC_BITWIDTH_12, 0, 1);
-    VoltageDivider voltage2(kVoltage2Pin, ADC_ATTEN_DB_12, ADC_BITWIDTH_12, 0, 1);
-    VoltageDivider current2(kCurrent2Pin, ADC_ATTEN_DB_12, ADC_BITWIDTH_12, 0, 1);
+    // Get and print MAC
+    uint8_t mac[6];
+    esp_efuse_mac_get_default(mac);
+    ESP_LOGI(TAG, "Device MAC: %02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1],
+             mac[2], mac[3], mac[4], mac[5]);
 
-    ESP_ERROR_CHECK(voltage1.init());
-    ESP_ERROR_CHECK(current1.init());
-    ESP_ERROR_CHECK(voltage2.init());
-    ESP_ERROR_CHECK(current2.init());
-
-    DYP_A22YYMW distanceSensor(kTrigPin, kEchoPin);
-    g_distance = &distanceSensor;
-    ESP_ERROR_CHECK(distanceSensor.init());
-
-    // BLE configuration
-    ble_config_t config;
-    ret = BLELibrary::createDefaultConfig(&config, kBleServerOnly);
-    ESP_ERROR_CHECK(ret);
-    strncpy(config.deviceName, "PowerMeter", BLE_MAX_DEVICE_NAME_LEN - 1);
-    config.autoStart      = false;
-    config.enableLogging  = true;
-    config.logLevel       = ESP_LOG_INFO;
-
-    BLELibrary *ble = new BLELibrary(config);
-    ESP_ERROR_CHECK(ble->init());
-
-    BLEServer *server = ble->getServer();
-    g_server = server;
-    if (server == nullptr) {
-        ESP_LOGE(TAG, "BLE server not available");
-        delete ble;
-        return;
-    }
-
-    bleServerConfig_t serverConfig = server->getConfig();
-    serverConfig.maxClients             = 4;
-    serverConfig.enableNotifications    = true;
-    serverConfig.autoStartAdvertising   = false;
-    serverConfig.enableJsonCommands     = false;
-    server->setConfig(serverConfig);
-
-    // Relay control via BLE: 0x00 = OFF, 0x01 = ON
-    server->setDataWrittenCallback(
-        [](uint16_t connID, const uint8_t *data, uint16_t length) {
-            if (length < 1) return;
-            if (data[0] == 0x01 || g_proximity_active) {
-                gpio_set_level(kRelayPin, 1);
-                g_relay_forced = (data[0] == 0x01);
-                ESP_LOGI(TAG, "BLE  Relay ON");
-            } else if (data[0] == 0x00) {
-                gpio_set_level(kRelayPin, 0);
-                g_relay_forced = false;
-                ESP_LOGI(TAG, "BLE  Relay OFF");
-            } else {
-                ESP_LOGW(TAG, "BLE  Unknown command: 0x%02X", data[0]);
-            }
-        });
-
-    // Always restart advertising after a client disconnects
-    server->setClientDisconnectedCallback([](uint16_t connID, int reason) {
-        ESP_LOGI(TAG, "Client %d disconnected (reason %d), restarting advertising...", connID, reason);
-        if (g_server) g_server->startAdvertising();
-    });
-
-    server->setClientConnectedCallback(
-        [](uint16_t connID, const ble_device_info_t *clientInfo) {
-            ESP_LOGI(TAG, "Client connected - ID: %d, MAC: %02x:%02x:%02x:%02x:%02x:%02x",
-                     connID,
-                     clientInfo->address[0], clientInfo->address[1],
-                     clientInfo->address[2], clientInfo->address[3],
-                     clientInfo->address[4], clientInfo->address[5]);
-        });
-
-    ESP_ERROR_CHECK(server->startAdvertising());
-    ESP_LOGI(TAG, "BLE advertising started as 'PowerMeter'");
+    espServer.initialize();
+    espServer.addPeer(broadcastMac);
 
     while (true) {
-        voltage1.measure();
-        current1.measure();
-        voltage2.measure();
-        current2.measure();
-
-        printf("V1 raw: %d (%d mV), I1 raw: %d (%d mV) | "
-                 "V2 raw: %d (%d mV), I2 raw: %d (%d mV)\n",
-                 voltage1.getValue(), voltage1.getCalibratedMv(),
-                 current1.getValue(), current1.getCalibratedMv(),
-                 voltage2.getValue(), voltage2.getCalibratedMv(),
-                 current2.getValue(), current2.getCalibratedMv());
-
-        float distanceMm = 0.0f;
-        esp_err_t distErr = distanceSensor.readDistance(&distanceMm);
-        if (distErr == ESP_OK) {
-            g_proximity_active = (distanceMm < kProximityMm);
-            ESP_LOGI(TAG, "Distance: %.1f mm (%.1f cm)", distanceMm, distanceMm / 10.0f);
-        } else {
-            g_proximity_active = false;
-            ESP_LOGW(TAG, "Distance sensor error: %s", esp_err_to_name(distErr));
+        // Check for new messages
+        if (espServer.hasNewMessage()) {
+            // Get the message
+            std::string receivedData;
+            espServer.receiveData(receivedData);
+            ESP_LOGI(TAG, "Received data: %s", receivedData.c_str());
+            
+            if (receivedData == "ON") {
+                gpio_set_level(kRelayPin, 1);  // Turn relay ON
+                kRelayForced = true;
+                ESP_LOGI(TAG, "ESP-NOW: Relay ON");
+                gpio_set_level(kRelayPin, 1);  // Turn relay ON
+                kRelayForced = true;
+                espServer.sendBroadcast("ACK:ON");
+            } else if (receivedData == "ALERT:ON") {
+                ESP_LOGI(TAG, "Received ALERT:ON command.");
+                gpio_set_level(kRelayPin, 1);
+                kRelayForced = true;
+                espServer.sendBroadcast("ACK:ALERT:ON");
+            }
+            else if (receivedData == "OFF") {
+                gpio_set_level(kRelayPin, 0);  // Turn relay OFF
+                kRelayForced = false;
+                ESP_LOGI(TAG, "ESP-NOW: Relay OFF");
+                espServer.sendBroadcast("ACK:OFF");
+            }
+            else if (receivedData == "ALERT:OFF") {
+                ESP_LOGI(TAG, "Received ALERT:OFF command.");
+                gpio_set_level(kRelayPin, 0);
+                kRelayForced = false;
+                espServer.sendBroadcast("ACK");
+            }
+            else {
+                ESP_LOGW(TAG, "Unknown command: %s", receivedData.c_str());
+            }
         }
 
-        if (g_proximity_active) {
-            gpio_set_level(kRelayPin, 1);
-        } else if (!g_relay_forced) {
-            gpio_set_level(kRelayPin, 0);
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(500));
+        // Short delay to prevent CPU hogging
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
