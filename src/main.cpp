@@ -1,11 +1,10 @@
 #include "esp_mac.h"
-#include "esp_timer.h"
-#include "esp_log.h"
 #include "espnow_sense.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
 #include "actuators_sense.hpp"
+#include "power_meter_watchdog.hpp"
 
 #define TAG "ESP_NOW_SERVER_TEST"
 
@@ -20,6 +19,10 @@ constexpr gpio_num_t kRGBPin = GPIO_NUM_2;
 static bool kRelayForced = false;  // true = relay locked ON by ESP-NOW command
 
 extern "C" void app_main() {
+
+    // Initialize watchdog system: 1minute timeout, restart every 24 hours
+    power_meter_watchdog::init(60000, 24);
+    ESP_LOGI(TAG, "Watchdog system initialized");
 
     // Configure relay pin as output
     gpio_config_t relay_cfg = {};
@@ -44,6 +47,9 @@ extern "C" void app_main() {
     espServer.addPeer(broadcastMac);
 
     while (true) {
+        // Feed the watchdog to prove we're alive
+        power_meter_watchdog::feed();
+
         // Check for new messages
         if (espServer.hasNewMessage()) {
             // Get the message
