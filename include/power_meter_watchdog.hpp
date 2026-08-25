@@ -15,10 +15,10 @@ namespace power_meter_watchdog {
 
 /**
  * @brief Initialize and start the watchdog system
- * @param watchdogTimeoutMs Watchdog timeout in milliseconds (default: 30000 = 30s)
- * @param dailyRestartHours Hours between automatic restarts (default: 24)
+ * @param watchdogTimeoutS Watchdog timeout in seconds (default: 30 = 30s)
+ * @param dailyRestartMinutes Minutes between automatic restarts (default: 60)
  */
-void init(uint32_t watchdogTimeoutMs = 30000, uint32_t dailyRestartHours = 24);
+void init(uint32_t watchdogTimeoutS = 30, uint32_t dailyRestartMinutes = 60);
 
 /**
  * @brief Feed the watchdog - call this periodically in your main loop

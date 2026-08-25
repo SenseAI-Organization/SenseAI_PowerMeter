@@ -23,8 +23,8 @@ constexpr int64_t kMessageTimeOutUs = 2 * 60 * 1000000LL;  // 2 minutes in micro
 
 extern "C" void app_main() {
 
-    // Initialize watchdog system: 1minute timeout, restart every 24 hours
-    power_meter_watchdog::init(60000, 1);
+    // Initialize watchdog system: 60 seconds timeout, restart every 2 mites
+    power_meter_watchdog::init(60, 20);
     ESP_LOGI(TAG, "Watchdog system initialized");
 
     // Configure relay pin as output
@@ -99,10 +99,7 @@ extern "C" void app_main() {
             int64_t currentTime = esp_timer_get_time();
             int64_t timeSinceLastMessage = currentTime - lastMessageTime;
             
-            if (timeSinceLastMessage > kMessageTimeOutUs && kRelayForced) {
-                gpio_set_level(kRelayPin, 0);  // Turn relay OFF
-                kRelayForced = false;
-                ESP_LOGW(TAG, "Message timeout - Relay turned OFF for safety");
+            if (timeSinceLastMessage > kMessageTimeOutUs) {
                 esp_restart();  // Restart the device to reset state
             }
         }
