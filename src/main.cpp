@@ -13,7 +13,7 @@
 // uint8_t serverMac[6] = {0x48, 0xCA, 0x43, 0x15, 0xFF, 0x4C};
 uint8_t broadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
-constexpr gpio_num_t kRelayPin = GPIO_NUM_38;
+constexpr gpio_num_t kRelayPin = GPIO_NUM_14;
 
 constexpr gpio_num_t kRGBPin = GPIO_NUM_2;
 
