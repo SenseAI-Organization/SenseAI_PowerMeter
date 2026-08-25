@@ -5,6 +5,7 @@
 #include "driver/gpio.h"
 #include "actuators_sense.hpp"
 #include "power_meter_watchdog.hpp"
+#include "esp_timer.h"
 
 #define TAG "ESP_NOW_SERVER_TEST"
 
@@ -12,16 +13,18 @@
 // uint8_t serverMac[6] = {0x48, 0xCA, 0x43, 0x15, 0xFF, 0x4C};
 uint8_t broadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
-constexpr gpio_num_t kRelayPin = GPIO_NUM_14;
+constexpr gpio_num_t kRelayPin = GPIO_NUM_38;
 
 constexpr gpio_num_t kRGBPin = GPIO_NUM_2;
 
 static bool kRelayForced = false;  // true = relay locked ON by ESP-NOW command
+static int64_t lastMessageTime = 0;  // timestamp of last ON/OFF message
+constexpr int64_t kMessageTimeOutUs = 2 * 60 * 1000000LL;  // 2 minutes in microseconds
 
 extern "C" void app_main() {
 
     // Initialize watchdog system: 1minute timeout, restart every 24 hours
-    power_meter_watchdog::init(60000, 24);
+    power_meter_watchdog::init(60000, 1);
     ESP_LOGI(TAG, "Watchdog system initialized");
 
     // Configure relay pin as output
@@ -60,6 +63,7 @@ extern "C" void app_main() {
             if (receivedData == "ON") {
                 gpio_set_level(kRelayPin, 1);  // Turn relay ON
                 kRelayForced = true;
+                lastMessageTime = esp_timer_get_time();  // Record timestamp
                 ESP_LOGI(TAG, "ESP-NOW: Relay ON");
                 gpio_set_level(kRelayPin, 1);  // Turn relay ON
                 kRelayForced = true;
@@ -68,11 +72,13 @@ extern "C" void app_main() {
                 ESP_LOGI(TAG, "Received ALERT:ON command.");
                 gpio_set_level(kRelayPin, 1);
                 kRelayForced = true;
+                lastMessageTime = esp_timer_get_time();  // Record timestamp
                 espServer.sendBroadcast("ACK:ALERT:ON");
             }
             else if (receivedData == "OFF") {
                 gpio_set_level(kRelayPin, 0);  // Turn relay OFF
                 kRelayForced = false;
+                lastMessageTime = esp_timer_get_time();  // Record timestamp
                 ESP_LOGI(TAG, "ESP-NOW: Relay OFF");
                 espServer.sendBroadcast("ACK:OFF");
             }
@@ -80,10 +86,24 @@ extern "C" void app_main() {
                 ESP_LOGI(TAG, "Received ALERT:OFF command.");
                 gpio_set_level(kRelayPin, 0);
                 kRelayForced = false;
+                lastMessageTime = esp_timer_get_time();  // Record timestamp
                 espServer.sendBroadcast("ACK");
             }
             else {
                 ESP_LOGW(TAG, "Unknown command: %s", receivedData.c_str());
+            }
+        }
+
+        // Check for message timeout - turn off relay if no message for 2 minutes
+        if (lastMessageTime > 0) {  // Only check if we've received at least one message
+            int64_t currentTime = esp_timer_get_time();
+            int64_t timeSinceLastMessage = currentTime - lastMessageTime;
+            
+            if (timeSinceLastMessage > kMessageTimeOutUs && kRelayForced) {
+                gpio_set_level(kRelayPin, 0);  // Turn relay OFF
+                kRelayForced = false;
+                ESP_LOGW(TAG, "Message timeout - Relay turned OFF for safety");
+                esp_restart();  // Restart the device to reset state
             }
         }
 
