@@ -45,4 +45,40 @@ del compilador; no se archivó copia de distribución en esta sesión).
   20 min con la válvula abierta, subir `kActiveTimeoutUs`.
 
 **Sin commitear:** `src/main.cpp` (reescrito), `WORKLOG.md` (nuevo). Rama
-`feature/espnowActivation`.
+`feature/espnowActivation`. *(Commiteado por el usuario después de esta entrada.)*
+
+---
+
+## 2026-08-29 — LED RGB de estado + parpadeo por mensaje
+
+**Hecho:** Reincorporado el LED RGB WS2812 (`RGB` de actuators-library) a la FSM
+de `src/main.cpp`:
+
+- Color de estado, seteado junto con el relé: **rojo** (`kLedLevel,0,0`) en
+  `kIdle`/`kStopping` (válvula OFF), **verde** (`0,kLedLevel,0`) en `kStarting`
+  (válvula ON). `kActive` hereda el verde de `kStarting`.
+- `blinkAck(RGB&)`: parpadea `kAckBlinks` (2) veces sin cambiar el color de
+  estado (`turnOff()` → `turnOn()` restaura el último `setColor`). Se llama
+  **después de cada `sendBroadcast` de ACK**, ante cualquier mensaje ESP-NOW
+  recibido (ON/OFF/desconocido). NO parpadea en el cierre por fail-safe
+  (`rxMsg == "TIMEOUT"`), que no es un mensaje recibido.
+- Constantes nuevas: `kLedPin = GPIO_NUM_2`, `kLedLevel = 32`, `kAckBlinks = 2`,
+  `kAckBlinkMs = 80`. Re-agregado `#include "actuators_sense.hpp"`.
+- La librería `actuators-library` ya trae el fix: el build resuelve
+  `actuators-library @ ...sha.6c378dc` ("hotfix: RGB class and its example timing
+  fixed"). Su copia en `.pio/libdeps` es idéntica a
+  `C:\Users\escob\Desktop\SenseAI\LibreriasSense\actuators-library\actuators-library`
+  (rama `dev`, sin commits sin pushear). No hizo falta tocar `platformio.ini`.
+
+**Evidencia:** `pio run` → `[SUCCESS]`. RAM 10.5%, Flash 65.4%.
+
+**Artefactos:** `.pio/build/esp32-s3-devkitc-1/firmware.{elf,bin}` (salida del
+compilador; sin copia de distribución archivada).
+
+**Pendiente:**
+- Verificar en hardware el pin del WS2812 (`GPIO_NUM_2`, heredado del código
+  viejo) y que rojo/verde se vean bien con `kLedLevel = 32`.
+- Confirmar que el parpadeo de ~320 ms tras el ACK no molesta; ajustar
+  `kAckBlinks`/`kAckBlinkMs` si hace falta.
+
+**Sin commitear:** `src/main.cpp`, `WORKLOG.md`. Rama `feature/espnowActivation`.

@@ -11,9 +11,13 @@
  *
  * Cada transición aplica los pines y el ACK UNA sola vez; el resto del tiempo
  * el lazo solo espera un mensaje nuevo (o el vencimiento del fail-safe).
+ *
+ * LED RGB (WS2812): rojo = válvula cerrada, verde = válvula abierta. Ante cada
+ * mensaje ESP-NOW recibido parpadea, siempre después de mandar el ACK.
  ******************************************************************************/
 #include <string>
 
+#include "actuators_sense.hpp"
 #include "driver/gpio.h"
 #include "esp_mac.h"
 #include "esp_timer.h"
@@ -28,6 +32,18 @@ namespace {
 
 // GPIO del relé que abre/cierra la válvula.
 constexpr gpio_num_t kRelayPin = GPIO_NUM_14;
+
+// GPIO de datos del LED RGB WS2812.
+constexpr gpio_num_t kLedPin = GPIO_NUM_2;
+
+// Brillo del WS2812 (0-255). Moderado para no encandilar.
+constexpr uint8_t kLedLevel = 32;
+
+// Parpadeo de confirmación tras recibir un mensaje: nº de destellos y duración
+// de cada semiciclo. Bloquea ~kAckBlinks*2*kAckBlinkMs ms, siempre después del
+// ACK, así que no retrasa la respuesta al emisor.
+constexpr int kAckBlinks     = 2;
+constexpr int kAckBlinkMs    = 80;
 
 // MAC de broadcast: el emisor (BeeSense) manda por broadcast y espera el ACK.
 uint8_t kBroadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
@@ -63,6 +79,17 @@ void configureRelayPin() {
     gpio_set_level(kRelayPin, 0);  // arranca con la válvula cerrada
 }
 
+// Destella el LED sin cambiar el color de estado: turnOn() restaura el último
+// setColor() (rojo o verde). Señala "mensaje recibido".
+void blinkAck(RGB& led) {
+    for (int i = 0; i < kAckBlinks; ++i) {
+        led.turnOff();
+        vTaskDelay(pdMS_TO_TICKS(kAckBlinkMs));
+        led.turnOn();
+        vTaskDelay(pdMS_TO_TICKS(kAckBlinkMs));
+    }
+}
+
 }  // namespace
 
 extern "C" void app_main() {
@@ -73,6 +100,11 @@ extern "C" void app_main() {
     ESP_LOGI(TAG, "Watchdog inicializado (60s / 24h)");
 
     configureRelayPin();
+
+    RGB led(kLedPin);
+    if (led.init() != ESP_OK) {
+        ESP_LOGE(TAG, "No se pudo inicializar el LED RGB");
+    }
 
     EspNow espServer(6, 1, true);
 
@@ -93,7 +125,7 @@ extern "C" void app_main() {
         power_meter_watchdog::feed();
 
         // entering == true solo en el primer ciclo de cada estado: ahí se
-        // aplican pines/log una única vez por transición.
+        // aplican pines/LED/log una única vez por transición.
         const bool entering = (state != prevState);
         prevState = state;
 
@@ -102,6 +134,7 @@ extern "C" void app_main() {
             case ValveState::kIdle: {
                 if (entering) {
                     gpio_set_level(kRelayPin, 0);
+                    led.setColor(kLedLevel, 0, 0);  // rojo: válvula OFF
                     ESP_LOGI(TAG, "Estado: IDLE (valvula OFF)");
                 }
                 if (espServer.hasNewMessage()) {
@@ -115,9 +148,11 @@ extern "C" void app_main() {
                             // Ya está cerrada; se confirma igual para que el
                             // emisor no reintente.
                             espServer.sendBroadcast("ACK:OFF");
+                            blinkAck(led);
                             break;
                         case Command::kUnknown:
                             ESP_LOGW(TAG, "Comando desconocido: %s", rxMsg.c_str());
+                            blinkAck(led);
                             break;
                     }
                 }
@@ -127,7 +162,9 @@ extern "C" void app_main() {
             // ---- Start Valve + Send ACK (transitorio) ----
             case ValveState::kStarting: {
                 gpio_set_level(kRelayPin, 1);
+                led.setColor(0, kLedLevel, 0);  // verde: válvula ON
                 espServer.sendBroadcast("ACK:" + rxMsg);
+                blinkAck(led);
                 valveOnSince = esp_timer_get_time();  // (re)arranca el fail-safe
                 ESP_LOGI(TAG, "Valvula ON + ACK (%s)", rxMsg.c_str());
                 state = ValveState::kActive;
@@ -145,8 +182,8 @@ extern "C" void app_main() {
                     switch (parseCommand(rxMsg)) {
                         case Command::kOn:
                             // Reconfirmación: se vuelve por kStarting para reusar
-                            // el único punto de entrada (pin + ACK + reinicio del
-                            // fail-safe).
+                            // el único punto de entrada (pin + LED + ACK +
+                            // reinicio del fail-safe).
                             state = ValveState::kStarting;
                             break;
                         case Command::kOff:
@@ -154,6 +191,7 @@ extern "C" void app_main() {
                             break;
                         case Command::kUnknown:
                             ESP_LOGW(TAG, "Comando desconocido: %s", rxMsg.c_str());
+                            blinkAck(led);
                             break;
                     }
                 } else if (esp_timer_get_time() - valveOnSince > kActiveTimeoutUs) {
@@ -167,8 +205,11 @@ extern "C" void app_main() {
 
             // ---- Stop valve + send ACK (transitorio) ----
             case ValveState::kStopping: {
+                const bool fromTimeout = (rxMsg == "TIMEOUT");
                 gpio_set_level(kRelayPin, 0);
+                led.setColor(kLedLevel, 0, 0);  // rojo: válvula OFF
                 espServer.sendBroadcast("ACK:OFF");
+                if (!fromTimeout) blinkAck(led);  // el timeout no es mensaje recibido
                 ESP_LOGI(TAG, "Valvula OFF + ACK (motivo: %s)", rxMsg.c_str());
                 state = ValveState::kIdle;
                 break;
